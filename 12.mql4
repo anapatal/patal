@@ -1,0 +1,139 @@
+//+------------------------------------------------------------------+
+//|                     Universal Roughness-Based AI Strategy         |
+//+------------------------------------------------------------------+
+#property strict
+
+// === Inputs ===
+input int VolatilityLookbackLength = 14;       // Volatility Lookback Length
+input double MaxRoughness = 0.001;             // Max Roughness (normalized)
+input double StopLossMultiplier = 2.0;         // Stop Loss Multiplier
+input double RiskRewardRatio = 3.0;            // Risk-Reward Ratio
+
+// === Global Variables ===
+double roughnessArray[];
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   ArraySetAsSeries(roughnessArray, true);
+   return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   // Calculate roughness
+   double roughness = CalculateRoughness(VolatilityLookbackLength);
+   
+   // Calculate MAs
+   double fastMA = iMA(NULL, 0, 10, 0, MODE_SMA, PRICE_CLOSE, 0);
+   double slowMA = iMA(NULL, 0, 30, 0, MODE_SMA, PRICE_CLOSE, 0);
+   double prevFastMA = iMA(NULL, 0, 10, 0, MODE_SMA, PRICE_CLOSE, 1);
+   double prevSlowMA = iMA(NULL, 0, 30, 0, MODE_SMA, PRICE_CLOSE, 1);
+   
+   bool canTrade = roughness < MaxRoughness;
+   
+   // Check trading signals
+   bool longSignal = (prevFastMA <= prevSlowMA && fastMA > slowMA) && canTrade;
+   bool shortSignal = (prevFastMA >= prevSlowMA && fastMA < slowMA) && canTrade;
+   
+   // Calculate dynamic stops
+   double stopLoss = roughness * Close[0] * StopLossMultiplier;
+   double takeProfit = stopLoss * RiskRewardRatio;
+   
+   // Check for safety exit
+   double crazyRoughnessThreshold = MaxRoughness * 2.5;
+   if(roughness > crazyRoughnessThreshold)
+   {
+      CloseAllPositions("Market too Rough!");
+      return;
+   }
+   
+   // Manage trades
+   if(longSignal)
+   {
+      if(CountOpenPositions() == 0)
+      {
+         double sl = NormalizeDouble(Close[0] - stopLoss, Digits);
+         double tp = NormalizeDouble(Close[0] + takeProfit, Digits);
+         OrderSend(Symbol(), OP_BUY, 0.1, Ask, 3, sl, tp, "Long", 0, 0, clrGreen);
+      }
+   }
+   else if(shortSignal)
+   {
+      if(CountOpenPositions() == 0)
+      {
+         double sl = NormalizeDouble(Close[0] + stopLoss, Digits);
+         double tp = NormalizeDouble(Close[0] - takeProfit, Digits);
+         OrderSend(Symbol(), OP_SELL, 0.1, Bid, 3, sl, tp, "Short", 0, 0, clrRed);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Calculate Roughness                                              |
+//+------------------------------------------------------------------+
+double CalculateRoughness(int length)
+{
+   double sum = 0;
+   for(int i = 0; i < length; i++)
+   {
+      double priceChange = MathAbs(Close[i] - Close[i+1]) / Close[i];
+      sum += priceChange;
+   }
+   return sum / length;
+}
+
+//+------------------------------------------------------------------+
+//| Count Open Positions                                             |
+//+------------------------------------------------------------------+
+int CountOpenPositions()
+{
+   int count = 0;
+   for(int i = 0; i < OrdersTotal(); i++)
+   {
+      if(OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
+      {
+         if(OrderSymbol() == Symbol() && (OrderType() == OP_BUY || OrderType() == OP_SELL))
+         {
+            count++;
+         }
+      }
+   }
+   return count;
+}
+
+//+------------------------------------------------------------------+
+//| Close All Positions                                              |
+//+------------------------------------------------------------------+
+void CloseAllPositions(string comment)
+{
+   for(int i = OrdersTotal()-1; i >= 0; i--)
+   {
+      if(OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
+      {
+         if(OrderSymbol() == Symbol())
+         {
+            if(OrderType() == OP_BUY)
+            {
+               OrderClose(OrderTicket(), OrderLots(), Bid, 3, clrNONE);
+            }
+            else if(OrderType() == OP_SELL)
+            {
+               OrderClose(OrderTicket(), OrderLots(), Ask, 3, clrNONE);
+            }
+         }
+      }
+   }
+}
