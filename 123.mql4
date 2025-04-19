@@ -1,0 +1,83 @@
+//+------------------------------------------------------------------+
+//|                                   MadMathTradingStrategy.mq4     |
+//+------------------------------------------------------------------+
+#property copyright "Mad Math Quant"
+#property version   "1.00"
+#property strict
+
+// Input Parameters
+input int    WeierstrassTerms = 10;     // Terms for Weierstrass approx (a=0.5, b=5)
+input double VolatilityThreshold = 50;  // Weierstrass threshold (no trade if above)
+input int    ConsolidationPeriod = 14;  // Cantor consolidation detection (ATR)
+input double ATRThreshold = 0.0010;     // Max ATR for flat zones
+input double PsychLevelDistance = 5e-4; // Distance to psych levels (0.0005 = 5 pips)
+
+// Global Variables
+double a = 0.5;      // Weierstrass parameter
+int b = 5;           // Weierstrass parameter
+int magicNumber = 2023;
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit() {
+  return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick() {
+  // Avoid multiple trades on the same bar
+  if (Volume[0] > 1) return;
+
+  // 1. Calculate Weierstrass Fractal Volatility
+  double weierstrass = 0.0;
+  for (int n = 0; n < WeierstrassTerms; n++) {
+    weierstrass += pow(a, n) * MathCos(pow(b, n) * M_PI * Close[0]);
+  }
+  weierstrass = MathAbs(weierstrass);
+
+  // 2. Detect Consolidation (Cantor Flat Zones via ATR)
+  double atr = iATR(Symbol(), 0, ConsolidationPeriod, 0);
+  bool isConsolidating = (atr < ATRThreshold);
+
+  // 3. Check Psychological Levels (Popcorn Function)
+  bool isNearPsychLevel = IsNearPsychologicalLevel(Close[0], PsychLevelDistance);
+
+  // Trading Logic
+  if (weierstrass < VolatilityThreshold && isConsolidating && isNearPsychLevel) {
+    // Mean-Reversion Signal: Fade the psych level
+    if (Close[0] > NormalizeDouble(Close[0], 2)) { // Price above psych level → SELL
+      OpenTrade(OP_SELL);
+    } else { // Price below psych level → BUY
+      OpenTrade(OP_BUY);
+    }
+  }
+}
+
+//+------------------------------------------------------------------+
+//| Check if price is near a psychological level (x.00, x.25, etc.)  |
+//+------------------------------------------------------------------+
+bool IsNearPsychologicalLevel(double price, double distance) {
+  double fraction = price - MathFloor(price);
+  double remainder = MathAbs(fraction - MathRound(fraction * 4) / 4); // Check quarters (0, 0.25, 0.5, 0.75)
+  return (remainder < distance);
+}
+
+//+------------------------------------------------------------------+
+//| Open a trade with risk management                                |
+//+------------------------------------------------------------------+
+void OpenTrade(int cmd) {
+  double sl = 0.0, tp = 0.0;
+  double entry = (cmd == OP_BUY) ? Ask : Bid;
+  double atr = iATR(Symbol(), 0, ConsolidationPeriod, 0);
+
+  // Stop Loss = 2x ATR, Take Profit = 1x ATR
+  sl = (cmd == OP_BUY) ? entry - 2*atr : entry + 2*atr;
+  tp = (cmd == OP_BUY) ? entry + atr : entry - atr;
+
+  // Execute order
+  OrderSend(Symbol(), cmd, 0.1, entry, 3, sl, tp, "MadMathTrade", magicNumber, 0, clrGreen);
+}
+//+------------------------------------------------------------------+
