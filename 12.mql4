@@ -1,31 +1,65 @@
 //+------------------------------------------------------------------+
-//|                     Universal Roughness-Based AI Strategy         |
+//|                Advanced Weierstrass Strategy                     |
 //+------------------------------------------------------------------+
 #property strict
 
-// === Inputs ===
-input int VolatilityLookbackLength = 14;       // Volatility Lookback Length
-input double MaxRoughness = 0.001;             // Max Roughness (normalized)
-input double StopLossMultiplier = 2.0;         // Stop Loss Multiplier
-input double RiskRewardRatio = 3.0;            // Risk-Reward Ratio
+// Input parameters
+input int    Iterations = 200;         // Number of iterations
+input double a_Param = 0.7;            // Parameter a (0 < a < 1)
+input double b_Param = 7.0;            // Parameter b (positive integer)
+input int    FastPeriod = 5;           // Fast Weierstrass MA period
+input int    SlowPeriod = 20;          // Slow Weierstrass MA period
+input double LotSize = 0.1;            // Base lot size
+input int    MagicNumber = 123456;     // EA magic number
+input double RiskPercent = 2.0;        // Risk percentage per trade
+input bool   UseTrailingStop = true;   // Enable trailing stop
+input int    TrailingStopPoints = 100; // Trailing stop distance
 
-// === Global Variables ===
-double roughnessArray[];
+// Global variables
+double wBuffer[];  // Array for Weierstrass values
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   ArraySetAsSeries(roughnessArray, true);
+   ArrayResize(wBuffer, SlowPeriod + 1);
+   ArraySetAsSeries(wBuffer, true);
    return(INIT_SUCCEEDED);
 }
 
 //+------------------------------------------------------------------+
-//| Expert deinitialization function                                 |
+//| Weierstrass fractal function                                     |
 //+------------------------------------------------------------------+
-void OnDeinit(const int reason)
+double WeierstrassFractal(double x, int n)
 {
+   double sum = 0.0;
+   for(int k=0; k<=n; k++)
+   {
+      sum += pow(a_Param, k) * sin(pow(b_Param, k) * M_PI * x);
+   }
+   return sum;
+}
+
+//+------------------------------------------------------------------+
+//| Calculate dynamic lot size based on risk                         |
+//+------------------------------------------------------------------+
+double CalculateLotSize(double stopLossDistance)
+{
+   double tickValue = MarketInfo(Symbol(), MODE_TICKVALUE);
+   if(tickValue == 0) return LotSize;
+   
+   double riskAmount = AccountBalance() * RiskPercent / 100.0;
+   double lotSize = riskAmount / (stopLossDistance * tickValue);
+   lotSize = NormalizeDouble(lotSize, 2);
+   
+   // Check minimum and maximum lot size
+   double minLot = MarketInfo(Symbol(), MODE_MINLOT);
+   double maxLot = MarketInfo(Symbol(), MODE_MAXLOT);
+   lotSize = MathMax(lotSize, minLot);
+   lotSize = MathMin(lotSize, maxLot);
+   
+   return lotSize;
 }
 
 //+------------------------------------------------------------------+
@@ -33,107 +67,79 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
-   // Calculate roughness
-   double roughness = CalculateRoughness(VolatilityLookbackLength);
+   // Calculate normalized price position (0 to 1)
+   static datetime lastBarTime = 0;
+   if(Time[0] == lastBarTime) return; // Process only once per bar
+   lastBarTime = Time[0];
    
-   // Calculate MAs
-   double fastMA = iMA(NULL, 0, 10, 0, MODE_SMA, PRICE_CLOSE, 0);
-   double slowMA = iMA(NULL, 0, 30, 0, MODE_SMA, PRICE_CLOSE, 0);
-   double prevFastMA = iMA(NULL, 0, 10, 0, MODE_SMA, PRICE_CLOSE, 1);
-   double prevSlowMA = iMA(NULL, 0, 30, 0, MODE_SMA, PRICE_CLOSE, 1);
+   double highest = iHigh(NULL, 0, iHighest(NULL, 0, MODE_HIGH, SlowPeriod, 1));
+   double lowest = iLow(NULL, 0, iLowest(NULL, 0, MODE_LOW, SlowPeriod, 1));
+   double range = highest - lowest;
+   if(range == 0) return;
    
-   bool canTrade = roughness < MaxRoughness;
+   double normalizedPrice = (Close[0] - lowest) / range;
    
-   // Check trading signals
-   bool longSignal = (prevFastMA <= prevSlowMA && fastMA > slowMA) && canTrade;
-   bool shortSignal = (prevFastMA >= prevSlowMA && fastMA < slowMA) && canTrade;
+   // Calculate Weierstrass value
+   double wValue = WeierstrassFractal(normalizedPrice, Iterations);
    
-   // Calculate dynamic stops
-   double stopLoss = roughness * Close[0] * StopLossMultiplier;
-   double takeProfit = stopLoss * RiskRewardRatio;
+   // Update buffer
+   for(int i=SlowPeriod; i>0; i--) wBuffer[i] = wBuffer[i-1];
+   wBuffer[0] = wValue;
    
-   // Check for safety exit
-   double crazyRoughnessThreshold = MaxRoughness * 2.5;
-   if(roughness > crazyRoughnessThreshold)
+   // Calculate fast and slow MAs of Weierstrass values
+   double fastMA = 0, slowMA = 0;
+   for(int i=0; i<FastPeriod; i++) fastMA += wBuffer[i];
+   for(int i=0; i<SlowPeriod; i++) slowMA += wBuffer[i];
+   fastMA /= FastPeriod;
+   slowMA /= SlowPeriod;
+   
+   // Trading logic
+   if(CountPositions() == 0)
    {
-      CloseAllPositions("Market too Rough!");
-      return;
-   }
-   
-   // Manage trades
-   if(longSignal)
-   {
-      if(CountOpenPositions() == 0)
+      // Buy signal when fast MA crosses above slow MA
+      if(fastMA > slowMA && wBuffer[0] > wBuffer[1])
       {
-         double sl = NormalizeDouble(Close[0] - stopLoss, Digits);
-         double tp = NormalizeDouble(Close[0] + takeProfit, Digits);
-         OrderSend(Symbol(), OP_BUY, 0.1, Ask, 3, sl, tp, "Long", 0, 0, clrGreen);
+         double sl = lowest;
+         double riskPoints = (Ask - sl) / Point;
+         if(riskPoints <= 0) return;
+         
+         double lots = CalculateLotSize(riskPoints);
+         double tp = Ask + (Ask - sl) * 2; // 1:2 risk-reward
+         OrderSend(Symbol(), OP_BUY, lots, Ask, 3, sl, tp, "Weierstrass Buy", MagicNumber, 0, clrGreen);
+      }
+      // Sell signal when fast MA crosses below slow MA
+      else if(fastMA < slowMA && wBuffer[0] < wBuffer[1])
+      {
+         double sl = highest;
+         double riskPoints = (sl - Bid) / Point;
+         if(riskPoints <= 0) return;
+         
+         double lots = CalculateLotSize(riskPoints);
+         double tp = Bid - (sl - Bid) * 2; // 1:2 risk-reward
+         OrderSend(Symbol(), OP_SELL, lots, Bid, 3, sl, tp, "Weierstrass Sell", MagicNumber, 0, clrRed);
       }
    }
-   else if(shortSignal)
+   else // Manage open positions
    {
-      if(CountOpenPositions() == 0)
+      if(UseTrailingStop)
       {
-         double sl = NormalizeDouble(Close[0] + stopLoss, Digits);
-         double tp = NormalizeDouble(Close[0] - takeProfit, Digits);
-         OrderSend(Symbol(), OP_SELL, 0.1, Bid, 3, sl, tp, "Short", 0, 0, clrRed);
-      }
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Calculate Roughness                                              |
-//+------------------------------------------------------------------+
-double CalculateRoughness(int length)
-{
-   double sum = 0;
-   for(int i = 0; i < length; i++)
-   {
-      double priceChange = MathAbs(Close[i] - Close[i+1]) / Close[i];
-      sum += priceChange;
-   }
-   return sum / length;
-}
-
-//+------------------------------------------------------------------+
-//| Count Open Positions                                             |
-//+------------------------------------------------------------------+
-int CountOpenPositions()
-{
-   int count = 0;
-   for(int i = 0; i < OrdersTotal(); i++)
-   {
-      if(OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
-      {
-         if(OrderSymbol() == Symbol() && (OrderType() == OP_BUY || OrderType() == OP_SELL))
+         for(int i=OrdersTotal()-1; i>=0; i--)
          {
-            count++;
-         }
-      }
-   }
-   return count;
-}
-
-//+------------------------------------------------------------------+
-//| Close All Positions                                              |
-//+------------------------------------------------------------------+
-void CloseAllPositions(string comment)
-{
-   for(int i = OrdersTotal()-1; i >= 0; i--)
-   {
-      if(OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
-      {
-         if(OrderSymbol() == Symbol())
-         {
-            if(OrderType() == OP_BUY)
+            if(OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
             {
-               OrderClose(OrderTicket(), OrderLots(), Bid, 3, clrNONE);
-            }
-            else if(OrderType() == OP_SELL)
-            {
-               OrderClose(OrderTicket(), OrderLots(), Ask, 3, clrNONE);
-            }
-         }
-      }
-   }
-}
+               if(OrderMagicNumber() == MagicNumber && OrderSymbol() == Symbol())
+               {
+                  if(OrderType() == OP_BUY)
+                  {
+                     double newSl = Bid - TrailingStopPoints * Point;
+                     newSl = NormalizeDouble(newSl, Digits);
+                     if(newSl > OrderStopLoss())
+                     {
+                        OrderModify(OrderTicket(), OrderOpenPrice(), newSl, OrderTakeProfit(), 0, clrNONE);
+                     }
+                  }
+                  else if(OrderType() == OP_SELL)
+                  {
+                     double newSl = Ask + TrailingStopPoints * Point;
+                     newSl = NormalizeDouble(newSl, Digits);
+                     if(newSl < OrderStopLoss() || OrderStopLoss() == 0)
